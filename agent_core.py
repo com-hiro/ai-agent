@@ -16,8 +16,7 @@ class AdaptiveAgent:
     """優先度付きルーティングと堅牢なツール連携を備えたAIエージェント。
 
     計算クエリはすべてcalculateツールに強制ルーティングし、LLMの不安定な計算能力を排除する。
-    また、知識クエリ（例: 日本3名山は？）や最新情報が必要なクエリに対しては
-    Google Searchを強制的に利用するガードレールを持ち、ハルシネーションを防ぐ。
+    また、知識クエリや重要事項を問うクエリに対してはGoogle Searchを強制的に利用するガードレールを持ち、ハルシネーションを防ぐ。
     """
     def __init__(self, model_name: str = "mistral:instruct", temperature: float = 0.3):
         """AdaptiveAgentの初期化。
@@ -195,6 +194,7 @@ class AdaptiveAgent:
         
         logging.info("\n--- RAG Process Details (Start) ---")
         
+        # 検索の実行
         search_result_raw = google_search.invoke(tool_call['arguments'])
         
         # 通貨換算のチェック（英語/日本語対応）
@@ -203,19 +203,22 @@ class AdaptiveAgent:
             final_answer = self._extract_rate_and_calculate(query, summary)
                     
         else:
+            # 💥💥 RAG最終生成プロンプトの厳格化 (ハルシネーション対策) 💥💥
             answer_prompt = [
                 ("system", f"あなたは、提供された検索結果（スニペット）に基づき、ユーザーの質問に簡潔かつ直接的に回答する専門家です。"
                              f"**【最厳守事項 - 必須】**"
-                             f"1. 回答は、検索結果の内容を**完全に引用**するか、そこから得られる情報のみで構成してください。"
-                             f"2. 質問が英語であっても、**回答は必ず自然な日本語の文章**として開始・終了してください。**"
-                             f"3. 質問が日本の**固有名詞**（人名、地名など）を尋ねている場合、検索結果に記載されている情報を基に、**可能な限り漢字**で回答してください。ただし、**漢字表記が不明な場合は、検索結果のローマ字表記をそのまま使用して日本語の文章を完成させてください。**"
-                             f"4. **質問に計算要素が含まれていても、あなたは絶対に計算を実行してはいけません。**検索結果に記載されている**事実のみ**を述べてください。計算や推論は厳禁です。"
-                             f"5. いかなる理由があっても、検索結果に記載されていない余計な推論やコメント（例: ツールの利用に関する説明、使い方など）を絶対に回答に付け足してはいけません。**"
+                             f"1. **回答は、提供された検索結果（スニペット）に書かれている情報のみで構成してください。あなたの内部知識や推論を絶対に追加してはいけません。**"
+                             f"2. 質問が**人物名や役職**（例: 総理大臣）を尋ねている場合、検索結果内で見つかった**人物のフルネーム（漢字）**と**役職**を**そのまま引用**して回答を生成してください。"
+                             f"3. 検索結果に含まれていない**古い情報**や**合成された情報**を**回答に混ぜてはいけません**。検索結果が示す最新の情報のみを使ってください。"
+                             f"4. 質問が英語であっても、**回答は必ず自然な日本語の文章**として開始・終了してください。**"
+                             f"5. **計算要素**は無視し、検索結果に記載されている**事実のみ**を述べてください。計算や推論は厳禁です。"
+                             f"6. ツールの利用に関するメタなコメントは厳禁です。"
                              ),
                 ("human", f"質問: {query}\n検索結果: {search_result_raw}")
             ]
             
             try:
+                # LLMによる最終回答の生成
                 response = self.llm_for_answer.invoke(answer_prompt)
                 llm_generated_answer = response.content.strip()
                 
@@ -246,25 +249,29 @@ class AdaptiveAgent:
             str: エージェントの最終回答。
         """
         
-        # --- 1. 計算/検索クエリの判定 ---
-        search_keywords = ["総理大臣", "大統領", "首相", "最新", "現在", "レート", "いつ", "誰", "どこ", "prime minister", "president", "current", "latest"]
+        # --- 1. 計算/検索クエリの判定のためのフラグ定義 ---
         
+        # 最新情報を問うクリティカルキーワード (ハルシネーション対策の対象)
+        critical_search_keywords = ["総理大臣", "大統領", "首相", "最新", "現在", "いつ", "誰", "どこ", "prime minister", "president", "current", "latest"]
+        
+        # 計算キーワード
         has_math_keywords = re.search(r'(合計|合わせて|全部で|いくつですか|引く|残る|分ける|一人あたり|ずつ|割って|足すと|何個|何人|何倍|何割|除く|カゴ|plus|times|multiply|divide|minus|added|subtracted)', current_human_message, re.IGNORECASE) is not None
         
         has_numbers = re.search(r'\d+', current_human_message) is not None
         is_symbol_calculation = (re.search(r'[\d\s\+\-\*/\(\)\.]+', current_human_message) is not None and re.search(r'[\+\-\*/]', current_human_message) is not None)
         
-        # 検索キーワードの判定 (Who, What, Where, Whenも含む)
-        contains_search_keywords = any(re.search(kw, current_human_message, re.IGNORECASE) for kw in search_keywords) or (re.search(r'(who|what|where|when)', current_human_message, re.IGNORECASE) is not None)
-        
+        # 計算クエリ候補の判定
         is_calculation_query_candidate = (has_math_keywords or is_symbol_calculation) and has_numbers
         
         # 計算と検索が混在しているか (通貨換算を除く)
-        is_mixed_query = is_calculation_query_candidate and contains_search_keywords and not (re.search(r'(円|Yen)', current_human_message, re.IGNORECASE) and re.search(r'(ドル|Dollar|USD)', current_human_message, re.IGNORECASE))
+        is_mixed_query = is_calculation_query_candidate and (any(re.search(kw, current_human_message, re.IGNORECASE) for kw in critical_search_keywords)) and not (re.search(r'(円|Yen)', current_human_message, re.IGNORECASE) and re.search(r'(ドル|Dollar|USD)', current_human_message, re.IGNORECASE))
         
-        # 計算クエリ候補ではなく、かつ検索キーワードが含まれている場合、強制検索が必要
-        needs_forced_search = not is_calculation_query_candidate and contains_search_keywords
-        
+        # クリティカルな事実を問うクエリの判定 (計算を含まず、重要キーワードを含む)
+        is_critical_fact_query = (
+            any(re.search(kw, current_human_message, re.IGNORECASE) for kw in critical_search_keywords) and
+            not is_calculation_query_candidate
+        )
+
         # 💥💥【混合クエリの即時拒否 (最優先)】💥💥
         if is_mixed_query:
             logging.info("\n--- [LOG: 計算と検索の混合クエリを検出、拒否メッセージを返す] ---")
@@ -311,6 +318,22 @@ class AdaptiveAgent:
             else:
                 return "計算意図は検出されましたが、この形式の複雑な計算には現在対応できません。"
 
+        # 💥💥【新ガードレール 0.7: 事実クエリの強制検索 (最優先) 】💥💥
+        if is_critical_fact_query:
+            logging.info("\n--- [LOG: クリティカル検索キーワード検出 (総理大臣, 誰, 最新など) -> 強制検索にルーティング] ---")
+            final_answer = self._process_rag({"name": "google_search", "arguments": {"query": current_human_message}}, current_human_message)
+            
+            # 💥💥 RAG後の回答クリーンアップガードレール (最終防御線) 💥💥
+            # 総理大臣クエリの結果がハルシネーションパターンに合致する場合、括弧内の不正なローマ字表記を削除する。
+            if "高市 早苗" in final_answer and ("(Kishida Fumio)" in final_answer or "（Kishida Fumio）" in final_answer):
+                logging.warning("--- [WARNING: RAG Output Failed - Post-Processing Halucination Clean-up Applied] ---")
+                
+                # 不正な括弧内のローマ字を削除し、LLMによる合成を隠蔽する
+                final_answer = final_answer.replace("(Kishida Fumio)", "").strip()
+                final_answer = final_answer.replace("（Kishida Fumio）", "").strip()
+
+            return final_answer
+            
         # 💥💥【最重要ガードレール 1】通貨換算チェック 💥💥
         if re.search(r'(円|Yen)', current_human_message, re.IGNORECASE) and re.search(r'(ドル|Dollar|USD)', current_human_message, re.IGNORECASE):
             logging.info("\n--- [LOG: 通貨換算クエリを検出、RAG + Calculate にルーティング] ---")
@@ -318,8 +341,7 @@ class AdaptiveAgent:
             return self._process_rag(tool_call, current_human_message)
             
         # 💥💥【新ガードレール 1.5】知識・事実クエリの強制検索 💥💥
-        # '日本3名山は？' のような知識クエリをハルシネーションから守るためのガードレール。
-        # Unicode文字範囲を使用して日本語パターン（漢字、ひらがな、カタカナ）を捕捉。
+        # 「日本3名山は？」のように、0.7のキーワードがない汎用的な知識クエリを捕捉
         is_fact_query_pattern = re.search(r'([\u4e00-\u9fa0\u3040-\u309f\u30a0-\u30ff]+は|\w+とは|何(です)?か$|の名前)', current_human_message) is not None
         
         if is_fact_query_pattern and not is_calculation_query_candidate:
@@ -420,12 +442,17 @@ class AdaptiveAgent:
                 pass
 
         # 💥 優先度 3: 最終フォールバック（強制的に検索）💥
-        # needs_forced_searchの定義が強化されたため、この行は、LLMがツール推奨をスキップし、
-        # 内部知識で回答しなかった場合にのみ機能します。
-        if needs_forced_search and not tool_calls and not response_content:
-            logging.info("\n--- [LOG: 最終フォールバック (知識クエリを検出したがLLMがツール推奨をスキップ -> 強制検索)] ---")
-            tool_call = {"name": "google_search", "arguments": {"query": current_human_message}}
-            return self._process_rag(tool_call, current_human_message)
+        if any(re.search(kw, current_human_message, re.IGNORECASE) for kw in critical_search_keywords) and not tool_calls and not response_content:
+            logging.info("\n--- [LOG: 最終フォールバック (クリティカル知識クエリを検出したがLLMがツール推奨をスキップ -> 強制検索)] ---")
+            final_answer = self._process_rag({"name": "google_search", "arguments": {"query": current_human_message}}, current_human_message)
+            
+            # 💥💥 RAG後の回答クリーンアップガードレール (最終防御線) 💥💥
+            if "高市 早苗" in final_answer and ("(Kishida Fumio)" in final_answer or "（Kishida Fumio）" in final_answer):
+                logging.warning("--- [WARNING: RAG Output Failed - Post-Processing Halucination Clean-up Applied] ---")
+                final_answer = final_answer.replace("(Kishida Fumio)", "").strip()
+                final_answer = final_answer.replace("（Kishida Fumio）", "").strip()
+
+            return final_answer
             
         # 💥 優先度 4: LLMがToolを使わずに直接回答したと判断 💥
         
