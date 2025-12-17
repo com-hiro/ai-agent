@@ -52,7 +52,7 @@ def main():
     if LOG_ENABLED:
         logging.info("Ollama Tool Agent 起動（安全・モジュール化版、終了するには Ctrl/Cmd+C）")
     else:
-        print("\nOllama Tool Agent 起動（終了するには Ctrl/Cmd+C）")
+        print("\nOllama Tool Agent 起動（終了するには Ctrl+C）")
         print("例: 100を5で割って、それに20を足すといくつ？")
 
     
